@@ -1,0 +1,303 @@
+```{r}
+#Esta librería nos ayudará a filtrar los datos
+library(dplyr)
+
+#Se lee el archivo csv que estará en la misma carpeta que el archivo .R. El primero corresponde con los datos del PAM y el segundo con datos a parte, en este caso valores de irradiancia para calcular la absortancia del talo y el nombre de la muestra
+Datos_PAM <- read.csv("PAM_RUGU_15_03.csv", header=FALSE, sep=";", dec=".")
+Absortancia_NombreMuestra<- read.csv("a_Muestra.txt", header=TRUE, sep=";", dec=".")
+Absortancia_Inicial <- Absortancia_NombreMuestra[ , "AI"] 
+Absortancia_Final <- Absortancia_NombreMuestra[ , "AF"]
+Muestra <- Absortancia_NombreMuestra[ , "Muestra"]
+#PuntoOutlier <- 1
+
+#Extraemos las columnas que nos son de interés. Name equivale a las medidas de F0 (primer punto) y F (el resto). Será fundamental esta columna para filtrar los datos.
+Name <- Datos_PAM$V4
+F <- Datos_PAM$V6
+Fm <- Datos_PAM$V7
+PAR <- Datos_PAM$V8
+
+# Name <- Datos_PAM$V5
+# F <- Datos_PAM$V7
+# Fm <- Datos_PAM$V8
+# PAR <- Datos_PAM$V9
+
+#Estos valores son los mismos para cada muestra y serán necesarios para el cálculo de ETR, muestra únicamente lo añado como etiqueta.
+Absortancia_Inicial <- rep(Absortancia_Inicial, each=9) 
+Absortancia_Final <- rep(Absortancia_Final, each=9) 
+Muestra <- rep(Muestra, each=9) 
+
+#Creamos un grupo de datos a partir de las columnas de interés
+Datos_PAM <- data.frame(Name, F, Fm, PAR )
+
+#Se filtran los datos que presenten F o F0, los demás serán columnas sin interés para el cálculo de las RLC
+Datos_PAM <- Datos_PAM %>% filter(Name=="F" | Name=="FO")
+
+#El número corresponde con las filas que tienen datos que no queremos que lea, generalmente curvas fallidas
+Datos_PAM <- Datos_PAM[-c(118),]
+
+#Se unen todos los valores en un data frame
+Datos_PAM <- data.frame(Muestra, Datos_PAM, Absortancia_Inicial, Absortancia_Final )
+
+#Los datos de F, Fm y PAR no se cargan como numéricos, por lo que debemos de transformarlos
+Datos_PAM <- transform(Datos_PAM, F=as.numeric(as.character(F)), Fm=as.numeric(as.character(Fm)), PAR=as.numeric(as.character(PAR)))
+
+#Para confirmar que se han incluido de forma numérica
+          is.numeric(Datos_PAM$F)
+          is.numeric(Datos_PAM$Fm)
+          is.numeric(Datos_PAM$PAR)
+          is.numeric(Datos_PAM$Absortancia_Inicial)
+          is.numeric(Datos_PAM$Absortancia_Final)
+          is.numeric(Datos_PAM$Muestra)
+
+#Un bucle repite el cálculo de ETR para todas las muestras
+for(i in 1:(length (Datos_PAM$Fm))){
+  Datos_PAM$YIELD[i] <- ((Datos_PAM$Fm[i] - Datos_PAM$F[i])/Datos_PAM$Fm[i]) 
+}
+
+for(i in 1:(length (Datos_PAM$Fm))){
+  Datos_PAM$ETR[i] <- Datos_PAM$YIELD[i] * 0.5  * Datos_PAM$PAR[i]*((Datos_PAM$Absortancia_Inicial[i]-Datos_PAM$Absortancia_Final[i])/Datos_PAM$Absortancia_Inicial[i])
+}
+
+#AJUSTE SEGÚN LA FUNCIÓN PROPUESTA POR PLATT ET AL. 1980#########################
+#Definimos la función a ajustar 
+EPPLAT <- function(PBs, alfaPLAT, BetaPLAT, I){PBs*(1-exp((-alfaPLAT*I)/PBs))*exp((-BetaPLAT*I)/PBs)}
+
+#Definimos los parámetros iniciales para el tanteo
+PBs <- 15
+alfaPLAT <- 0.3
+BetaPLAT <- 0.04
+
+
+#La función error que vamos a usar como criterio
+ ERROR_EP <- function(dat,par){ 
+  EP_AjPLAT <- EPPLAT(par[1], par[2], par[3], Datos_Ajuste$PAR)
+  with(dat, sum((Datos_Ajuste$ETR-EP_AjPLAT)^2))
+ }
+ 
+#Vector que incluye el error que produce cada uno de los puntos
+  Vector_Errores <- function(dat,par){ 
+  EP_AjPLAT <- EPPLAT(par[1], par[2], par[3], Datos_Ajuste$PAR)
+  with(dat, (((Datos_Ajuste$ETR-EP_AjPLAT)^2)/var(Datos_Ajuste$ETR)))
+  }
+  
+#Creamos vectores que almacenen los parámetros de la función y cualquier parámetro que calculemos
+alfaPLATF <- vector()
+BetaPLATF<- vector()
+PBsPLATF <- vector()
+IkPLAT <- vector() 
+IbPLAT <- vector() 
+ImPLAT <- vector() 
+PBmPLAT <- vector()
+R2PLAT <- vector()
+
+#Designamos el número de curvas que se han cargado
+n <- nrow(Datos_PAM)/9 
+
+#Definimos el bucle de ajuste a partir de la irradiancia y la tasa de transporte de electrones
+for (i in 1:n){
+  acaba <- 9*i
+  empieza <- acaba - 8
+  PAR<- Datos_PAM[empieza:acaba,5]
+  ETR <- Datos_PAM[empieza:acaba,9]
+  Muestra <- Datos_PAM[empieza:acaba,1]
+  plot (PAR, ETR )
+  Datos_Ajuste <- data.frame(PAR, ETR, Muestra)
+  
+  
+ #El ajuste de los parámetros, según la función error, usando los datos descritos
+  AjusteEPPLAT <- optim (par=c(PBs,alfaPLAT,BetaPLAT),ERROR_EP,dat=Datos_Ajuste)
+  
+  #Si se desea, puede no comentarse este bloque, eliminando así los puntos que excedan el error individual designado por el parámetro PuntoOutlier. Generalmente, valores entre 0.1 y 0.5 descartan aquellos puntos más elejados de la función 
+  # PuntoOutlier <- which(Vector_Errores(par=c(AjusteEPPLAT$par[1],AjusteEPPLAT$par[2],AjusteEPPLAT$par[3]), dat=Datos_Ajuste)>CriterioPuntoOutlier)
+  # Datos_Ajuste$ETR[PuntoOutlier]<- NA
+  # Datos_Ajuste$PAR[PuntoOutlier]<- NA 
+  # Datos_Ajuste <- na.omit(Datos_Ajuste)
+  # 
+  # AjusteEPPLAT <- optim(par=c(PBs,alfaPLAT,BetaPLAT),ERROR_EP,dat=Datos_Ajuste) 
+
+#PARA CALCULAR R2
+  Valor_Error <- AjusteEPPLAT$value
+  R2PLAT[i]<- 1 - Valor_Error/(var(Datos_Ajuste$ETR)*(length(Datos_Ajuste$ETR)-1)) #Cálculo de R2 
+  
+ #Obtener los parámetros 
+ PBsPLATF[i] <-  AjusteEPPLAT$par[1]
+ alfaPLATF[i] <- AjusteEPPLAT$par[2]
+ BetaPLATF[i] <- AjusteEPPLAT$par[3]
+ 
+ PBmPLAT[i] <-  AjusteEPPLAT$par[1]*(AjusteEPPLAT$par[2]/(AjusteEPPLAT$par[2]+AjusteEPPLAT$par[3]))*(AjusteEPPLAT$par[3]/(AjusteEPPLAT$par[2]+AjusteEPPLAT$par[3]))^(AjusteEPPLAT$par[3]/AjusteEPPLAT$par[2])
+ IkPLAT[i] <-   PBmPLAT[i]/AjusteEPPLAT$par[2]
+ IbPLAT[i] <-   PBmPLAT[i]/AjusteEPPLAT$par[3]
+ ImPLAT[i] <-   AjusteEPPLAT$par[1]/AjusteEPPLAT$par[2]*log((AjusteEPPLAT$par[2]+AjusteEPPLAT$par[3])/AjusteEPPLAT$par[3], base=exp(1))
+ 
+ #Representar la nube de puntos y la función ajustada
+  plot(Datos_Ajuste$PAR, Datos_Ajuste$ETR, xlab="Irradiancia", ylab="ETR", lwd=1.5,
+     main=Datos_Ajuste$Muestra, cex.main=0.8)
+lines(Datos_Ajuste$PAR, EPPLAT(AjusteEPPLAT$par[1],AjusteEPPLAT$par[2],AjusteEPPLAT$par[3], Datos_Ajuste$PAR))
+}
+
+#Exportar los resultados a un data frame
+ResultadosPLAT <- data.frame(alfaPLATF, BetaPLATF, PBsPLATF, PBmPLAT, IkPLAT, IbPLAT, ImPLAT, R2PLAT)
+
+#Exportarlos como tabla que podemos copiar a word o excel
+write.table(ResultadosPLAT)
+
+
+ #Ajuste según la función propuesta en Peeter & Eilers 1988 ###############
+
+#Definimos los parámetros ininciales del tanteo
+a <- 60/1000000
+b <- 4/100
+c <- 0.1/10
+
+ #Definimos la función a ajustar 
+EP <- function(a, b, c, I){I/(I^2*(a
+)+I*(b)+(c))}
+
+#La función error que vamos a usar como criterio
+ ERROR_EP <- function(dat,par){ 
+  EP_Aj <- EP(par[1], par[2], par[3], Datos_Ajuste$PAR)
+  with(dat, sum((Datos_Ajuste$ETR-EP_Aj)^2))
+}
+#Vector que incluye el error que produce cada uno de los puntos
+  Vector_Errores <- function(dat,par){ 
+  EP_Aj <- EP(par[1], par[2], par[3], Datos_Ajuste$PAR)
+  with(dat, (((Datos_Ajuste$ETR-EP_Aj)^2)/var(Datos_Ajuste$ETR)))
+  }
+
+#Creamos vectores que almacenen los parámetros de la función
+alfa <- vector()
+Eopt <- vector()
+Ek <- vector()
+ETRm <- vector()
+w <- vector()
+R2<- vector()
+aresult <- vector()
+bresult <- vector()
+cresult <- vector()
+#Designamos el número de curvas que se han cargado
+n <- nrow(Datos_PAM)/9 
+
+#Definimos el bucle de ajuste
+for (i in 1:n){
+  acaba <- 9*i
+  empieza <- acaba - 8
+  PAR<- Datos_PAM[empieza:acaba,5]
+  ETR <- Datos_PAM[empieza:acaba,9]
+  Muestra <-Datos_PAM[empieza:acaba,9]
+  plot (PAR, ETR )
+  Datos_Ajuste <- data.frame(PAR, ETR)
+
+#El ajuste de los parámetros, según la función error, usando los datos descritos
+  
+  AjusteEP <- optim (par=c(a,b,c),ERROR_EP,dat=Datos_Ajuste)
+  
+  #PuntoOutlier <- which(Vector_Errores(par=c(AjusteEP$par[1],AjusteEP$par[2],AjusteEP$par[3]), dat=Datos_Ajuste)>CriterioPuntoOutlier)
+  #Datos_Ajuste$ETR[PuntoOutlier]<- NA
+  #Datos_Ajuste$PAR[PuntoOutlier]<- NA 
+  #Datos_Ajuste <- na.omit(Datos_Ajuste)
+  
+  #AjusteEP <- optim(par=c(a,b,c),ERROR_EP,dat=Datos_Ajuste)
+
+#PARA CALCULAR R2
+  Valor_Error <- AjusteEP$value
+  R2[i]<- 1 - Valor_Error/(var(Datos_Ajuste$ETR)*(length(Datos_Ajuste$ETR)-1)) #Cálculo de R2 
+ 
+  #Para obtener los parámetros
+  A <- AjusteEP$par[1]
+  B <- AjusteEP$par[2]
+  C <- AjusteEP$par[3]
+  
+  alfa[i] <- 1/C
+  Eopt[i] <- sqrt(C/A)
+  ETRm[i] <- 1/(B+2*sqrt(A*C))
+  Ek[i] <- C/(B+2*sqrt(A*C))
+  w[i] <- B/sqrt(A*C)
+  aresult[i] <- AjusteEP$par[1]
+  bresult[i] <- AjusteEP$par[2]
+  cresult[i] <- AjusteEP$par[3]
+  
+  plot(Datos_Ajuste$PAR, Datos_Ajuste$ETR, xlab="Irradiancia", ylab="ETR", lwd=1.5,
+     main="Curva ETR-luz", cex.main=0.8)
+lines(Datos_Ajuste$PAR, EP(AjusteEP$par[1],AjusteEP$par[2],AjusteEP$par[3], Datos_Ajuste$PAR))
+}
+Resultados <- data.frame(alfa, Eopt, Ek, ETRm, w, R2, YieldParaFvFm, aresult, bresult,cresult)
+
+# Ajuste según la función propuesta en Steele 1962 ###############
+  #Ajuste Logistico
+  #Se definen los parámetros inciales para la iteración numérica
+Pm <- 30
+a <- 1
+
+
+ #Definimos la función a ajustar 
+P <- function(a, Pm, I){Pm*(1-exp((-a*I)/Pm))}
+
+#La función error que vamos a usar como criterio
+ ERROR_EP <- function(dat,par){ 
+  EP_Aj <- P(par[1], par[2], Datos_Ajuste$PAR)
+  with(dat, sum((Datos_Ajuste$ETR-EP_Aj)^2))
+}
+#Vector que incluye el error que produce cada uno de los puntos
+  Vector_Errores <- function(dat,par){ 
+  EP_Aj <- P(par[1], par[2], Datos_Ajuste$PAR)
+  with(dat, (((Datos_Ajuste$ETR-EP_Aj)^2)/var(Datos_Ajuste$ETR)))
+  }
+
+#Creamos vectores que almacenen los parámetros de la función
+PmResult <- vector ()
+aresult <- vector()
+ekresult <- vector()
+R2 <- vector()
+
+#Designamos el número de curvas que se han cargado
+n <- nrow(Datos_PAM)/9
+
+#Definimos el bucle que elimina los dos últimos puntos de las RLC
+for (i in 1:n){
+  acaba <- 9*i
+  empieza <- acaba - 1
+  Datos_PAM[empieza:acaba,5] <- NA
+  Datos_PAM[empieza:acaba,9] <- NA
+}
+
+Datos_PAM <- na.omit(Datos_PAM)
+  
+  #Definimos el bucle de ajuste, ahora para 7 puntos en cada curva
+  
+for (i in 1:n){
+  acaba <- 7*i
+  empieza <- acaba - 6
+  PAR<- Datos_PAM[empieza:acaba,5]
+  ETR <- Datos_PAM[empieza:acaba,9]
+  plot (PAR, ETR )
+  Datos_Ajuste <- data.frame(PAR, ETR)
+
+#El ajuste de los parámetros, según la función error, usando los datos descritos
+  
+  AjusteEP <- optim (par=c(a, Pm),ERROR_EP,dat=Datos_Ajuste)
+  
+  # PuntoOutlier <- which(Vector_Errores(par=c(AjusteEP$par[1],AjusteEP$par[2]), dat=Datos_Ajuste)>CriterioPuntoOutlier)
+  # Datos_Ajuste$ETR[PuntoOutlier]<- NA
+  # Datos_Ajuste$PAR[PuntoOutlier]<- NA 
+  # Datos_Ajuste <- na.omit(Datos_Ajuste)
+  
+  #AjusteEP <- optim(par=c(a, Pm),ERROR_EP,dat=Datos_Ajuste)
+
+#PARA CALCULAR R2
+  Valor_Error <- AjusteEP$value
+  R2[i]<- 1 - Valor_Error/(var(Datos_Ajuste$ETR)*(length(Datos_Ajuste$ETR)-1)) #Cálculo de R2 
+ 
+  
+  PmResult[i] <- AjusteEP$par[2]
+  aresult[i] <- AjusteEP$par[1]
+  ekresult[i] <- AjusteEP$par[2]/ AjusteEP$par[1]
+
+  plot(Datos_Ajuste$PAR, Datos_Ajuste$ETR, xlab="Irradiancia", ylab="ETR", lwd=1.5,
+     main="Curva ETR-luz", cex.main=0.8)
+lines(Datos_Ajuste$PAR, P(AjusteEP$par[1],AjusteEP$par[2], Datos_Ajuste$PAR))
+}
+Resultados <- data.frame(PmResult, aresult, ekresult, R2, Absortancia_NombreMuestra[ , "Muestra"])
+write.table(Resultados)
+
+
+```
